@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Pipeline météo — 5 villes françaises, données en direct</title>
+<meta name="description" content="Pipeline de données météo en direct : extraction, transformation et visualisation pour Paris, Lyon, Marseille, Bordeaux et Lille, via l'API Open-Meteo." />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg: #0F1417;
+    --surface: #171D21;
+    --surface-2: #1D242A;
+    --line: #262E33;
+    --text: #E4E9EC;
+    --text-dim: #8B959B;
+    --accent: #5AA9E6;
+    --accent-dim: rgba(90,169,230,0.14);
+    --warm: #E8A85A;
+    --rain: #6FA8D8;
+    --snow: #A8D8E8;
+    --storm: #E0846B;
+  }
+  *{ box-sizing: border-box; }
+  html,body{ margin:0; padding:0; }
+  body{
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Sans', -apple-system, sans-serif;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono{ font-family: 'IBM Plex Mono', monospace; }
+
+  .shell{ max-width: 1180px; margin: 0 auto; padding: 44px 28px 80px; }
+
+  header.hero{ margin-bottom: 36px; }
+  header.hero .eyebrow{
+    font-family: 'IBM Plex Mono', monospace;
+    color: var(--accent);
+    font-size: 12.5px;
+    margin-bottom: 12px;
+  }
+  header.hero h1{
+    font-size: 30px;
+    font-weight: 700;
+    line-height: 1.25;
+    margin: 0 0 12px;
+    letter-spacing: -0.01em;
+    max-width: 620px;
+  }
+  header.hero p{
+    color: var(--text-dim);
+    font-size: 14.5px;
+    margin: 0;
+    max-width: 62ch;
+  }
+
+  /* Pipeline stage strip */
+  .pipeline-strip{
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin: 28px 0 40px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 4px;
+  }
+  .stage{
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px;
+    border-radius: 9px;
+    transition: background 0.3s, color 0.3s;
+    color: var(--text-dim);
+  }
+  .stage .dot{
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--line);
+    flex-shrink: 0;
+    transition: background 0.3s, box-shadow 0.3s;
+  }
+  .stage .label{ font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; }
+  .stage.active{ color: var(--text); }
+  .stage.active .dot{ background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .stage.done .dot{ background: #6FCF97; }
+  .stage-arrow{ color: var(--line); font-size: 14px; padding: 0 2px; }
+
+  .log-line{
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+    padding: 3px 0;
+    opacity: 0;
+    animation: fadeIn 0.3s forwards;
+  }
+  .log-line.ok{ color: #6FCF97; }
+  @keyframes fadeIn{ to{ opacity: 1; } }
+  #log-panel{
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 32px;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+
+  /* City cards */
+  .cities-grid{
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+    margin-bottom: 36px;
+  }
+  @media (max-width: 980px){ .cities-grid{ grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px){ .cities-grid{ grid-template-columns: 1fr; } }
+
+  .city-card{
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .city-card .city-name{ font-size: 15px; font-weight: 600; }
+  .city-card .city-desc{ font-size: 12.5px; color: var(--text-dim); }
+  .city-card .city-temp{
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 32px;
+    font-weight: 600;
+    margin-top: 2px;
+  }
+  .city-card .city-meta{
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: 'IBM Plex Mono', monospace;
+    margin-top: 4px;
+  }
+  .sparkline{ margin-top: 6px; }
+
+  .badge-row{ display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .badge{
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .badge.rain{ background: rgba(111,168,216,0.15); color: var(--rain); }
+  .badge.storm{ background: rgba(224,132,107,0.15); color: var(--storm); }
+  .badge.snow{ background: rgba(168,216,232,0.15); color: var(--snow); }
+
+  /* Highlights */
+  .highlights{
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-bottom: 36px;
+  }
+  @media (max-width: 640px){ .highlights{ grid-template-columns: 1fr; } }
+  .highlight-card{
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .highlight-card .h-label{ font-size: 12.5px; color: var(--text-dim); margin-bottom: 8px; }
+  .highlight-card .h-value{ font-size: 22px; font-weight: 700; }
+  .highlight-card .h-sub{ font-size: 12.5px; color: var(--text-dim); margin-top: 4px; font-family: 'IBM Plex Mono', monospace; }
+
+  /* Table */
+  .table-panel{
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 32px;
+    overflow-x: auto;
+  }
+  .table-panel h3{ font-size: 13px; color: var(--text-dim); margin: 0 0 16px; font-weight: 600; }
+  table{ width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th{
+    text-align: left;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    font-weight: 500;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  td{
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    font-family: 'IBM Plex Mono', monospace;
+    white-space: nowrap;
+  }
+  td.city-cell{ font-family: 'IBM Plex Sans', sans-serif; font-weight: 500; }
+  tr:last-child td{ border-bottom: none; }
+
+  footer{
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+    color: var(--text-dim);
+    font-size: 12.5px;
+    max-width: 720px;
+  }
+  footer p{ margin: 0 0 8px; }
+
+  .error-box{
+    background: rgba(224,132,107,0.1);
+    border: 1px solid rgba(224,132,107,0.3);
+    color: var(--storm);
+    border-radius: 10px;
+    padding: 16px 20px;
+    font-size: 13.5px;
+    margin-bottom: 24px;
+  }
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+  <header class="hero">
+    <div class="eyebrow mono">PIPELINE ETL — EXTRACT · TRANSFORM · LOAD · VISUALISE</div>
+    <h1>Météo en direct — 5 villes françaises</h1>
+    <p>Ce pipeline interroge l'API Open-Meteo en temps réel, agrège les données horaires en statistiques journalières pour Paris, Lyon, Marseille, Bordeaux et Lille, et affiche le résultat ci-dessous. Rechargez la page pour relancer une extraction fraîche.</p>
+  </header>
+
+  <div class="pipeline-strip" id="pipeline-strip">
+    <div class="stage" data-stage="extract"><span class="dot"></span><span class="label">EXTRACT</span></div>
+    <div class="stage-arrow">→</div>
+    <div class="stage" data-stage="transform"><span class="dot"></span><span class="label">TRANSFORM</span></div>
+    <div class="stage-arrow">→</div>
+    <div class="stage" data-stage="load"><span class="dot"></span><span class="label">LOAD</span></div>
+    <div class="stage-arrow">→</div>
+    <div class="stage" data-stage="visualise"><span class="dot"></span><span class="label">VISUALISE</span></div>
+  </div>
+
+  <div id="log-panel"></div>
+
+  <div id="error-container"></div>
+
+  <div class="cities-grid" id="cities-grid"></div>
+
+  <div class="highlights" id="highlights"></div>
+
+  <div class="table-panel">
+    <h3>Statistiques agrégées par ville (7 derniers jours)</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Ville</th>
+          <th>Temp. moyenne</th>
+          <th>Temp. max</th>
+          <th>Temp. min</th>
+          <th>Précipitations</th>
+          <th>Vent max</th>
+          <th>Heures de pluie</th>
+        </tr>
+      </thead>
+      <tbody id="stats-table-body"></tbody>
+    </table>
+  </div>
+
+  <footer>
+    <p>Données fournies par <a href="https://open-meteo.com" target="_blank" rel="noopener" style="color:var(--accent)">Open-Meteo</a> (API gratuite, sans clé). Extraction et transformation exécutées directement dans votre navigateur au chargement de la page — reproduit fidèlement la logique du pipeline Python source (agrégats journaliers, catégorisation, description des conditions).</p>
+    <p>Pipeline complet (version Python avec stockage SQLite, visualisations matplotlib et export JSON) disponible sur <a href="https://github.com/safwanmsellek-dotcom" target="_blank" rel="noopener" style="color:var(--accent)">GitHub</a>.</p>
+  </footer>
+
+</div>
+
+<script>
+const VILLES = {
+  "Paris":     { lat: 48.85, lon: 2.35 },
+  "Lyon":      { lat: 45.75, lon: 4.85 },
+  "Marseille": { lat: 43.30, lon: 5.37 },
+  "Bordeaux":  { lat: 44.84, lon: -0.58 },
+  "Lille":     { lat: 50.63, lon: 3.06 },
+};
+
+const CODE_METEO = {
+  0: "Ciel dégagé", 1: "Peu nuageux", 2: "Partiellement nuageux",
+  3: "Couvert", 45: "Brouillard", 48: "Brouillard givrant",
+  51: "Bruine légère", 53: "Bruine modérée", 55: "Bruine dense",
+  61: "Pluie légère", 63: "Pluie modérée", 65: "Pluie forte",
+  71: "Neige légère", 73: "Neige modérée", 75: "Neige forte",
+  80: "Averses légères", 81: "Averses modérées", 82: "Averses fortes",
+  95: "Orage", 96: "Orage avec grêle",
+};
+
+const el = id => document.getElementById(id);
+
+function setStage(name, state){
+  const node = document.querySelector(`.stage[data-stage="${name}"]`);
+  if (!node) return;
+  node.classList.remove('active','done');
+  if (state) node.classList.add(state);
+}
+
+function log(text, ok){
+  const line = document.createElement('div');
+  line.className = 'log-line' + (ok ? ' ok' : '');
+  line.textContent = (ok ? '✓ ' : '  ') + text;
+  el('log-panel').appendChild(line);
+  el('log-panel').scrollTop = el('log-panel').scrollHeight;
+}
+
+function catTemperature(t){
+  if (t < 0) return "Gel";
+  if (t < 10) return "Froid";
+  if (t < 20) return "Frais";
+  if (t < 30) return "Doux";
+  return "Chaud";
+}
+
+function drawSparkline(canvas, values){
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  if (values.length < 2) return;
+  const min = Math.min(...values), max = Math.max(...values);
+  const range = (max - min) || 1;
+  const stepX = w / (values.length - 1);
+
+  ctx.beginPath();
+  values.forEach((v, i) => {
+    const x = i * stepX;
+    const y = h - ((v - min) / range) * (h - 6) - 3;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = '#5AA9E6';
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  // point final
+  const lastX = (values.length - 1) * stepX;
+  const lastY = h - ((values[values.length-1] - min) / range) * (h - 6) - 3;
+  ctx.beginPath();
+  ctx.arc(lastX, lastY, 3, 0, Math.PI * 2);
+  ctx.fillStyle = '#5AA9E6';
+  ctx.fill();
+}
+
+async function fetchAllVilles(){
+  const lats = Object.values(VILLES).map(v => v.lat).join(',');
+  const lons = Object.values(VILLES).map(v => v.lon).join(',');
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}` +
+              `&hourly=temperature_2m,precipitation,wind_speed_10m,weather_code` +
+              `&past_days=7&forecast_days=1&timezone=Europe%2FParis`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Open-Meteo a répondu avec le statut ${res.status}`);
+  const data = await res.json();
+  return Array.isArray(data) ? data : [data];
+}
+
+function transformerVille(nom, apiResult){
+  const times = apiResult.hourly.time;
+  const temps = apiResult.hourly.temperature_2m;
+  const precs = apiResult.hourly.precipitation;
+  const vents = apiResult.hourly.wind_speed_10m;
+  const codes = apiResult.hourly.weather_code;
+
+  // Regroupement par date (agrégats journaliers, comme le script Python)
+  const parJour = {};
+  for (let i = 0; i < times.length; i++){
+    const date = times[i].slice(0, 10);
+    if (!parJour[date]) parJour[date] = { temps: [], precs: [], vents: [] };
+    parJour[date].temps.push(temps[i]);
+    parJour[date].precs.push(precs[i]);
+    parJour[date].vents.push(vents[i]);
+  }
+
+  const jours = Object.keys(parJour).sort();
+  const agg = jours.map(date => {
+    const d = parJour[date];
+    const temp_moy = d.temps.reduce((a,b)=>a+b,0) / d.temps.length;
+    const precip_total = d.precs.reduce((a,b)=>a+b,0);
+    return {
+      date,
+      temp_moy: Math.round(temp_moy * 10) / 10,
+      temp_max: Math.round(Math.max(...d.temps) * 10) / 10,
+      temp_min: Math.round(Math.min(...d.temps) * 10) / 10,
+      precip_total: Math.round(precip_total * 10) / 10,
+      vent_max: Math.round(Math.max(...d.vents) * 10) / 10,
+      heures_pluie: d.precs.filter(p => p > 0).length,
+    };
+  });
+
+  const dernierIdx = times.length - 1;
+  const actuel = {
+    temperature: temps[dernierIdx],
+    description: CODE_METEO[codes[dernierIdx]] || "Inconnu",
+    code: codes[dernierIdx],
+    vent: vents[dernierIdx],
+    categorie: catTemperature(temps[dernierIdx]),
+  };
+
+  const stats = {
+    temp_moyenne: Math.round((agg.reduce((a,j)=>a+j.temp_moy,0) / agg.length) * 10) / 10,
+    temp_max: Math.round(Math.max(...agg.map(j=>j.temp_max)) * 10) / 10,
+    temp_min: Math.round(Math.min(...agg.map(j=>j.temp_min)) * 10) / 10,
+    precipitations_totales: Math.round(agg.reduce((a,j)=>a+j.precip_total,0) * 10) / 10,
+    vent_max: Math.round(Math.max(...agg.map(j=>j.vent_max)) * 10) / 10,
+    heures_pluie_total: agg.reduce((a,j)=>a+j.heures_pluie,0),
+  };
+
+  return { nom, agg, actuel, stats };
+}
+
+function renderCityCard(ville){
+  const card = document.createElement('div');
+  card.className = 'city-card';
+
+  let badges = '';
+  if (ville.actuel.description.toLowerCase().includes('pluie') || ville.actuel.description.toLowerCase().includes('bruine') || ville.actuel.description.toLowerCase().includes('averse'))
+    badges += '<span class="badge rain">Pluie</span>';
+  if (ville.actuel.code === 95 || ville.actuel.code === 96)
+    badges += '<span class="badge storm">Orage</span>';
+  if (ville.actuel.description.toLowerCase().includes('neige'))
+    badges += '<span class="badge snow">Neige</span>';
+
+  card.innerHTML = `
+    <div class="city-name">${ville.nom}</div>
+    <div class="city-desc">${ville.actuel.description}</div>
+    <div class="city-temp">${ville.actuel.temperature.toFixed(1)}°</div>
+    <div class="badge-row">${badges}</div>
+    <canvas class="sparkline" width="200" height="40"></canvas>
+    <div class="city-meta">
+      <span>Vent ${ville.actuel.vent.toFixed(0)} km/h</span>
+      <span>${ville.actuel.categorie}</span>
+    </div>
+  `;
+  el('cities-grid').appendChild(card);
+  const canvas = card.querySelector('canvas');
+  drawSparkline(canvas, ville.agg.map(j => j.temp_moy));
+}
+
+function renderHighlights(resultats){
+  const plusChaude = [...resultats].sort((a,b) => b.stats.temp_moyenne - a.stats.temp_moyenne)[0];
+  const plusPluvieuse = [...resultats].sort((a,b) => b.stats.precipitations_totales - a.stats.precipitations_totales)[0];
+
+  el('highlights').innerHTML = `
+    <div class="highlight-card">
+      <div class="h-label">Ville la plus chaude</div>
+      <div class="h-value">${plusChaude.nom}</div>
+      <div class="h-sub mono">temp. moyenne ${plusChaude.stats.temp_moyenne}°C</div>
+    </div>
+    <div class="highlight-card">
+      <div class="h-label">Ville la plus pluvieuse</div>
+      <div class="h-value">${plusPluvieuse.nom}</div>
+      <div class="h-sub mono">${plusPluvieuse.stats.precipitations_totales} mm cumulés</div>
+    </div>
+  `;
+}
+
+function renderTable(resultats){
+  const tbody = el('stats-table-body');
+  tbody.innerHTML = '';
+  const tri = [...resultats].sort((a,b) => b.stats.temp_moyenne - a.stats.temp_moyenne);
+  tri.forEach(v => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="city-cell">${v.nom}</td>
+      <td>${v.stats.temp_moyenne}°C</td>
+      <td>${v.stats.temp_max}°C</td>
+      <td>${v.stats.temp_min}°C</td>
+      <td>${v.stats.precipitations_totales} mm</td>
+      <td>${v.stats.vent_max} km/h</td>
+      <td>${v.stats.heures_pluie_total} h</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function showError(message){
+  el('error-container').innerHTML = `<div class="error-box">Erreur lors de l'extraction des données météo : ${message}. L'API Open-Meteo est peut-être temporairement indisponible — rechargez la page pour réessayer.</div>`;
+}
+
+async function run(){
+  try {
+    setStage('extract', 'active');
+    log('Connexion à l\'API Open-Meteo (5 villes, requête groupée)...');
+    const raw = await fetchAllVilles();
+    log(`${raw.length} villes reçues, ${raw[0].hourly.time.length} points horaires par ville`, true);
+    setStage('extract', 'done');
+
+    setStage('transform', 'active');
+    const noms = Object.keys(VILLES);
+    const resultats = raw.map((r, i) => transformerVille(noms[i], r));
+    log(`Agrégats journaliers calculés pour ${resultats.length} villes`, true);
+    setStage('transform', 'done');
+
+    setStage('load', 'active');
+    resultats.forEach(v => renderCityCard(v));
+    log('Cartes ville rendues', true);
+    setStage('load', 'done');
+
+    setStage('visualise', 'active');
+    renderHighlights(resultats);
+    renderTable(resultats);
+    log('Tableau et synthèse générés', true);
+    setStage('visualise', 'done');
+
+  } catch (err){
+    showError(err.message || String(err));
+    console.error(err);
+  }
+}
+
+run();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,346 @@
+"""
+Pipeline météo automatisé — Paris & grandes villes françaises
+Source : Open-Meteo API (gratuite, sans clé)
+Architecture : Extraction → Transformation → Stockage SQLite → Export
+"""
+
+import sqlite3
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import json
+import os
+from datetime import datetime, timedelta
+
+# ─────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────
+
+VILLES = {
+    "Paris":     {"lat": 48.85, "lon": 2.35},
+    "Lyon":      {"lat": 45.75, "lon": 4.85},
+    "Marseille": {"lat": 43.30, "lon": 5.37},
+    "Bordeaux":  {"lat": 44.84, "lon": -0.58},
+    "Lille":     {"lat": 50.63, "lon": 3.06},
+}
+
+DB_PATH = "data/meteo.db"
+os.makedirs("data", exist_ok=True)
+os.makedirs("outputs", exist_ok=True)
+
+
+# ─────────────────────────────────────────────────────────────
+# ÉTAPE 1 — EXTRACTION
+# En prod : appel API Open-Meteo
+# Ici : simulation de 30 jours de données horaires
+# ─────────────────────────────────────────────────────────────
+
+def extraire_donnees_api(ville, lat, lon):
+    """
+    EN PRODUCTION — remplacer le corps par :
+
+    import requests
+    url = (
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}&longitude={lon}"
+        f"&hourly=temperature_2m,precipitation,windspeed_10m,weathercode"
+        f"&past_days=7&forecast_days=1&timezone=Europe/Paris"
+    )
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+
+    df = pd.DataFrame({
+        "datetime":    pd.to_datetime(data["hourly"]["time"]),
+        "temperature": data["hourly"]["temperature_2m"],
+        "precipitations": data["hourly"]["precipitation"],
+        "vent_kmh":    data["hourly"]["windspeed_10m"],
+        "code_meteo":  data["hourly"]["weathercode"],
+    })
+    df["ville"] = ville
+    return df
+    """
+
+    # ── SIMULATION RÉALISTE (30 jours × 24h) ──
+    np.random.seed(abs(hash(ville)) % 2**31)
+    n = 30 * 24
+    base_temp = {"Paris": 15, "Lyon": 17, "Marseille": 20,
+                 "Bordeaux": 18, "Lille": 13}[ville]
+
+    dates = [datetime(2024, 5, 1) + timedelta(hours=i) for i in range(n)]
+    heures = np.array([d.hour for d in dates])
+    jours  = np.array([d.timetuple().tm_yday for d in dates])
+
+    temp = (
+        base_temp
+        + 6 * np.sin((heures - 6) * np.pi / 12)   # cycle jour/nuit
+        + 3 * np.sin(jours * 2 * np.pi / 365)      # cycle saisonnier
+        + np.random.normal(0, 1.5, n)
+    )
+    precip = np.where(
+        np.random.random(n) < 0.12,
+        np.random.exponential(2, n), 0
+    )
+    vent = np.abs(np.random.normal(15, 8, n))
+    code = np.where(precip > 0, 61,
+           np.where(vent > 30, 3,
+           np.where(temp < 2, 71, 0)))
+
+    df = pd.DataFrame({
+        "datetime":       dates,
+        "temperature":    np.round(temp, 1),
+        "precipitations": np.round(precip, 1),
+        "vent_kmh":       np.round(vent, 1),
+        "code_meteo":     code.astype(int),
+        "ville":          ville,
+    })
+    return df
+
+
+def extraire_toutes_villes():
+    print("📡 Extraction des données météo...")
+    frames = []
+    for ville, coords in VILLES.items():
+        df = extraire_donnees_api(ville, coords["lat"], coords["lon"])
+        frames.append(df)
+        print(f"   ✅ {ville} — {len(df)} enregistrements")
+    return pd.concat(frames, ignore_index=True)
+
+
+# ─────────────────────────────────────────────────────────────
+# ÉTAPE 2 — TRANSFORMATION
+# ─────────────────────────────────────────────────────────────
+
+CODE_METEO = {
+    0: "Ciel dégagé", 1: "Peu nuageux", 2: "Partiellement nuageux",
+    3: "Couvert", 45: "Brouillard", 48: "Brouillard givrant",
+    51: "Bruine légère", 53: "Bruine modérée", 55: "Bruine dense",
+    61: "Pluie légère", 63: "Pluie modérée", 65: "Pluie forte",
+    71: "Neige légère", 73: "Neige modérée", 75: "Neige forte",
+    80: "Averses légères", 81: "Averses modérées", 82: "Averses fortes",
+    95: "Orage", 96: "Orage avec grêle",
+}
+
+def transformer(df_raw):
+    print("\n🔄 Transformation des données...")
+    df = df_raw.copy()
+
+    # Enrichissement temporel
+    df["date"]   = pd.to_datetime(df["datetime"]).dt.date
+    df["heure"]  = pd.to_datetime(df["datetime"]).dt.hour
+    df["jour_semaine"] = pd.to_datetime(df["datetime"]).dt.day_name()
+    df["semaine"] = pd.to_datetime(df["datetime"]).dt.isocalendar().week.astype(int)
+
+    # Description météo lisible
+    df["description"] = df["code_meteo"].map(CODE_METEO).fillna("Inconnu")
+
+    # Catégorie de température
+    df["cat_temperature"] = pd.cut(
+        df["temperature"],
+        bins=[-np.inf, 0, 10, 20, 30, np.inf],
+        labels=["Gel", "Froid", "Frais", "Doux", "Chaud"]
+    )
+
+    # Indicateurs booléens
+    df["pluie"]  = df["precipitations"] > 0
+    df["orage"]  = df["code_meteo"].isin([95, 96])
+    df["neige"]  = df["code_meteo"].isin([71, 73, 75])
+
+    # Agrégats journaliers
+    df_jour = df.groupby(["ville", "date"]).agg(
+        temp_moy=("temperature",    "mean"),
+        temp_max=("temperature",    "max"),
+        temp_min=("temperature",    "min"),
+        precip_total=("precipitations", "sum"),
+        vent_max=("vent_kmh",       "max"),
+        heures_pluie=("pluie",      "sum"),
+    ).reset_index()
+    df_jour["temp_moy"] = df_jour["temp_moy"].round(1)
+
+    print(f"   ✅ {len(df):,} lignes horaires transformées")
+    print(f"   ✅ {len(df_jour):,} agrégats journaliers créés")
+    return df, df_jour
+
+
+# ─────────────────────────────────────────────────────────────
+# ÉTAPE 3 — STOCKAGE SQLite
+# ─────────────────────────────────────────────────────────────
+
+def stocker(df_horaire, df_jour):
+    print(f"\n💾 Stockage dans {DB_PATH}...")
+    conn = sqlite3.connect(DB_PATH)
+
+    df_horaire.to_sql("meteo_horaire", conn, if_exists="replace", index=False)
+    df_jour.to_sql("meteo_journalier", conn, if_exists="replace", index=False)
+
+    # Vue SQL utile
+    conn.execute("""
+        CREATE VIEW IF NOT EXISTS v_stats_ville AS
+        SELECT
+            ville,
+            ROUND(AVG(temp_moy), 1)    AS temp_moyenne,
+            ROUND(MAX(temp_max), 1)    AS temp_max,
+            ROUND(MIN(temp_min), 1)    AS temp_min,
+            ROUND(SUM(precip_total), 1) AS precipitations_totales,
+            COUNT(*)                   AS nb_jours
+        FROM meteo_journalier
+        GROUP BY ville
+    """)
+    conn.commit()
+
+    # Vérification
+    n_h = conn.execute("SELECT COUNT(*) FROM meteo_horaire").fetchone()[0]
+    n_j = conn.execute("SELECT COUNT(*) FROM meteo_journalier").fetchone()[0]
+    print(f"   ✅ {n_h:,} lignes horaires stockées")
+    print(f"   ✅ {n_j:,} lignes journalières stockées")
+
+    conn.close()
+
+
+# ─────────────────────────────────────────────────────────────
+# ÉTAPE 4 — VISUALISATION
+# ─────────────────────────────────────────────────────────────
+
+COULEURS = {
+    "Paris": "#1F77B4", "Lyon": "#D62728", "Marseille": "#FF7F0E",
+    "Bordeaux": "#2CA02C", "Lille": "#9467BD"
+}
+
+def visualiser(df_horaire, df_jour):
+    print("\n📊 Génération des visualisations...")
+
+    plt.rcParams.update({
+        "font.family": "DejaVu Sans",
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "figure.facecolor": "#F8F9FA",
+        "axes.facecolor": "#F8F9FA",
+    })
+
+    fig = plt.figure(figsize=(18, 12))
+    fig.suptitle("Pipeline météo — 5 villes françaises | Mai 2024",
+                 fontsize=16, fontweight="bold", y=1.01)
+    gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.4, wspace=0.35)
+
+    # 1. Températures journalières par ville
+    ax1 = fig.add_subplot(gs[0, :2])
+    for ville in VILLES:
+        d = df_jour[df_jour["ville"] == ville].sort_values("date")
+        ax1.plot(range(len(d)), d["temp_moy"], label=ville,
+                 color=COULEURS[ville], linewidth=2)
+    ax1.set_title("Température moyenne journalière (°C)", fontweight="bold")
+    ax1.set_xlabel("Jour")
+    ax1.set_ylabel("Température (°C)")
+    ax1.legend(fontsize=9, ncol=5)
+    ax1.set_xticks(range(0, 30, 5))
+    ax1.set_xticklabels([f"J+{i}" for i in range(0, 30, 5)])
+
+    # 2. Précipitations totales par ville
+    ax2 = fig.add_subplot(gs[0, 2])
+    precip_ville = df_jour.groupby("ville")["precip_total"].sum().sort_values()
+    bars = ax2.barh(precip_ville.index, precip_ville.values,
+                    color=[COULEURS[v] for v in precip_ville.index])
+    ax2.set_title("Précipitations totales (mm)", fontweight="bold")
+    ax2.set_xlabel("mm")
+    for bar, val in zip(bars, precip_ville.values):
+        ax2.text(val + 0.5, bar.get_y() + bar.get_height()/2,
+                 f"{val:.0f}mm", va="center", fontsize=9)
+
+    # 3. Distribution températures par ville (boxplot)
+    ax3 = fig.add_subplot(gs[1, 0])
+    data_box = [df_horaire[df_horaire["ville"] == v]["temperature"].values
+                for v in VILLES]
+    bp = ax3.boxplot(data_box, patch_artist=True, labels=list(VILLES.keys()))
+    for patch, ville in zip(bp["boxes"], VILLES):
+        patch.set_facecolor(COULEURS[ville])
+        patch.set_alpha(0.7)
+    ax3.set_title("Distribution des températures (°C)", fontweight="bold")
+    ax3.tick_params(axis="x", rotation=30)
+
+    # 4. Profil journalier moyen (toutes villes)
+    ax4 = fig.add_subplot(gs[1, 1])
+    for ville in VILLES:
+        profil = df_horaire[df_horaire["ville"] == ville].groupby("heure")["temperature"].mean()
+        ax4.plot(profil.index, profil.values, color=COULEURS[ville],
+                 linewidth=2, alpha=0.8, label=ville)
+    ax4.set_title("Profil horaire moyen (°C)", fontweight="bold")
+    ax4.set_xlabel("Heure")
+    ax4.set_ylabel("Température (°C)")
+    ax4.set_xticks(range(0, 24, 4))
+    ax4.legend(fontsize=8, ncol=2)
+
+    # 5. Jours de pluie par ville
+    ax5 = fig.add_subplot(gs[1, 2])
+    jours_pluie = df_jour.groupby("ville").apply(
+        lambda x: (x["precip_total"] > 0).sum()
+    )
+    bars5 = ax5.bar(jours_pluie.index, jours_pluie.values,
+                    color=[COULEURS[v] for v in jours_pluie.index],
+                    edgecolor="white")
+    ax5.set_title("Jours de pluie (sur 30 jours)", fontweight="bold")
+    ax5.tick_params(axis="x", rotation=30)
+    for bar, val in zip(bars5, jours_pluie.values):
+        ax5.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.2,
+                 str(int(val)), ha="center", fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig("outputs/pipeline_meteo.png", dpi=150,
+                bbox_inches="tight", facecolor="#F8F9FA")
+    print("   ✅ Graphique sauvegardé : outputs/pipeline_meteo.png")
+
+
+# ─────────────────────────────────────────────────────────────
+# ÉTAPE 5 — RAPPORT SYNTHÈSE
+# ─────────────────────────────────────────────────────────────
+
+def generer_rapport(df_jour):
+    conn = sqlite3.connect(DB_PATH)
+    stats = pd.read_sql("SELECT * FROM v_stats_ville ORDER BY temp_moyenne DESC", conn)
+    conn.close()
+
+    rapport = {
+        "date_execution": datetime.now().isoformat(),
+        "periode": "Mai 2024 (30 jours)",
+        "villes": stats.to_dict(orient="records"),
+        "ville_la_plus_chaude": stats.iloc[0]["ville"],
+        "ville_la_plus_pluvieuse": stats.loc[stats["precipitations_totales"].idxmax(), "ville"],
+    }
+
+    with open("outputs/rapport.json", "w", encoding="utf-8") as f:
+        json.dump(rapport, f, ensure_ascii=False, indent=2)
+
+    print("\n📋 Rapport de synthèse :")
+    print(stats.to_string(index=False))
+    print(f"\n   ✅ Rapport sauvegardé : outputs/rapport.json")
+    return stats
+
+
+# ─────────────────────────────────────────────────────────────
+# MAIN — ORCHESTRATION DU PIPELINE
+# ─────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    print("=" * 55)
+    print("  PIPELINE MÉTÉO — DÉMARRAGE")
+    print(f"  {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    print("=" * 55)
+
+    # 1. Extract
+    df_raw = extraire_toutes_villes()
+
+    # 2. Transform
+    df_horaire, df_jour = transformer(df_raw)
+
+    # 3. Load
+    stocker(df_horaire, df_jour)
+
+    # 4. Visualise
+    visualiser(df_horaire, df_jour)
+
+    # 5. Rapport
+    generer_rapport(df_jour)
+
+    print("\n" + "=" * 55)
+    print("  ✅ PIPELINE TERMINÉ AVEC SUCCÈS")
+    print("=" * 55)
